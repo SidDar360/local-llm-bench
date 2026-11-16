@@ -51,6 +51,15 @@ bench stop           # shut it down
 bench sweep --quick  # run a benchmark sweep (args pass to bench.run)
 ```
 
+The dashboard lives at **http://llm-bench.localhost:8501**.
+
+That hostname needs no setup — `*.localhost` is reserved for loopback by
+RFC 6761 and resolves out of the box, so there is no `/etc/hosts` entry and no
+`sudo` involved. It is deliberately *not* a `.local` name: on macOS that TLD
+belongs to Bonjour/mDNS, which can intercept the lookup and ignore `/etc/hosts`
+entirely. `bench` falls back to `http://127.0.0.1:8501` if resolution ever
+fails, and `BENCH_PORT` overrides the port.
+
 Or drive the modules directly:
 
 ```bash
@@ -58,7 +67,7 @@ Or drive the modules directly:
 .venv/bin/python -m bench.run            # full sweep, 3 repeats
 .venv/bin/python -m bench.chart          # table + results/benchmark.png
 .venv/bin/python -m bench.serve --open   # stdlib dashboard at http://127.0.0.1:8000
-.venv/bin/streamlit run bench/app.py     # Streamlit dashboard at http://127.0.0.1:8501
+.venv/bin/streamlit run bench/app.py     # Streamlit dashboard at http://llm-bench.localhost:8501
 ```
 
 Two dashboards, deliberately. `bench.serve` is stdlib-only and renders whatever
