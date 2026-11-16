@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Start the local-llm-bench dashboard if it is not already up, then open it.
+#
+#   bench            start (if needed) and open the dashboard
+#   bench status     is it running?
+#   bench stop       shut it down
+#   bench sweep ...  run a benchmark sweep (args pass through to bench.run)
+set -euo pipefail
+
+# Resolve through any symlinks so the script finds the project from wherever
+# it was invoked.
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ $src != /* ]] && src="$dir/$src"
+done
+ROOT="$(cd -P "$(dirname "$src")/.." && pwd)"
+
+PORT="${BENCH_PORT:-8501}"
+
+# *.localhost is reserved for loopback (RFC 6761) and macOS resolves it without
+# any configuration -- no /etc/hosts entry, no sudo. Deliberately NOT a .local
+# name: that TLD belongs to Bonjour/mDNS on macOS, which can intercept the
+# lookup and ignore /etc/hosts. Fall back to the bare IP if resolution fails.
+HOSTNAME_PRETTY="llm-bench.localhost"
+if curl -fsS --max-time 1 "http://$HOSTNAME_PRETTY:$PORT/_stcore/health" >/dev/null 2>&1 \
+   || host "$HOSTNAME_PRETTY" >/dev/null 2>&1 \
+   || ping -c1 -t1 "$HOSTNAME_PRETTY" >/dev/null 2>&1; then
+  URL="http://$HOSTNAME_PRETTY:$PORT"
+else
+  URL="http://127.0.0.1:$PORT"
+fi
+
+VENV="$ROOT/.venv/bin"
+LOG="$ROOT/results/streamlit.log"
+
+# Health always goes to the loopback address: it is true regardless of whether
+# name resolution is set up, so `status` never lies because of a DNS detail.
+up() { curl -fsS --max-time 2 "http://127.0.0.1:$PORT/_stcore/health" >/dev/null 2>&1; }
+
+die() { printf '  %s\n' "$*" >&2; exit 1; }
+
+[ -x "$VENV/streamlit" ] || die "no venv at $ROOT/.venv — run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+
+case "${1:-start}" in
+  status)
+    if up; then echo "  running at $URL"; else echo "  not running"; fi
+    ;;
+
+  stop)
+    if up; then
+      pkill -f "streamlit run .*bench/app.py" || true
+      # pkill returns before the process is actually gone; wait for the port to
+      # go quiet so an immediately-following `status` or `start` is not racing it.
+      for _ in $(seq 1 20); do up || break; sleep 0.25; done
+      if up; then die "still responding on $PORT — kill it by hand"; fi
+      echo "  stopped"
+    else
+      echo "  not running"
+    fi
+    ;;
+
+  sweep)
+    shift
+    cd "$ROOT" && exec "$VENV/python" -m bench.run "$@"
+    ;;
+
+  start|"")
+    if up; then
+      echo "  already running"
+    else
+      [ -f "$ROOT/results/latest.json" ] || echo "  note: no results yet — run 'bench sweep --quick' first"
+      echo "  starting dashboard…"
+      mkdir -p "$ROOT/results"
+      ( cd "$ROOT" && nohup "$VENV/streamlit" run bench/app.py \
+          --server.port "$PORT" --server.headless true \
+          --browser.gatherUsageStats false >"$LOG" 2>&1 & )
+      for _ in $(seq 1 40); do up && break; sleep 0.5; done
+      up || die "failed to start — see $LOG"
+    fi
+    echo "  opening $URL"
+    open "$URL" 2>/dev/null || true
+    ;;
+
+  *)
+    die "usage: bench [start|status|stop|sweep ...]"
+    ;;
+esac

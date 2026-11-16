@@ -1,0 +1,5 @@
+openai>=1.0
+matplotlib>=3.8
+# dashboard (bench/app.py); bench/serve.py needs none of these
+streamlit>=1.67
+altair>=5

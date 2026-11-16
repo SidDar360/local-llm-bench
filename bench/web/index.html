@@ -1,0 +1,265 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>local-llm-bench</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #fcfcfb; --panel: #ffffff;
+    --text: #0b0b0b; --text-2: #52514e;
+    --grid: #e3e2de; --border: #e3e2de;
+    --s1: #2a78d6;  /* llama.cpp — categorical slot 1 */
+    --s2: #eb6834;  /* ollama    — categorical slot 2 */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface: #1a1a19; --panel: #232322;
+      --text: #ffffff; --text-2: #c3c2b7;
+      --grid: #35342f; --border: #35342f;
+      --s1: #3987e5; --s2: #d95926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 24px 64px;
+    background: var(--surface); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--text-2); font-size: 13px; }
+  .sub code { font-size: 12px; }
+  h2 { font-size: 13px; font-weight: 600; margin: 0; letter-spacing: -0.005em; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 28px; }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-2); margin-bottom: 8px; }
+  .tile .value { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .tile .note { font-size: 12px; color: var(--text-2); margin-top: 4px; }
+  .legend { display: flex; gap: 16px; align-items: center; margin: 0 0 14px; font-size: 12px; color: var(--text-2); }
+  .legend .key { display: inline-flex; gap: 7px; align-items: center; }
+  .legend .swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; position: relative; }
+  .panel .cap { font-size: 12px; color: var(--text-2); margin: 2px 0 10px; }
+  .tip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .09s;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.14);
+    white-space: nowrap; z-index: 5; font-variant-numeric: tabular-nums;
+  }
+  .tip .t-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .tip .t-head { color: var(--text-2); margin-bottom: 4px; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+  caption { text-align: left; font-size: 13px; font-weight: 600; padding-bottom: 10px; }
+  th, td { padding: 7px 10px; text-align: right; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child, th:nth-child(3), td:nth-child(3) { text-align: left; }
+  th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-2); font-weight: 500; }
+  tbody tr:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+  .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 7px; vertical-align: baseline; }
+  .tablewrap { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; overflow-x: auto; }
+  footer { margin-top: 24px; color: var(--text-2); font-size: 12px; }
+  .err { padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>local-llm-bench</h1>
+    <div class="sub" id="meta">loading…</div>
+  </header>
+  <div id="body"></div>
+</div>
+
+<script>
+const SERIES = { "llama.cpp": "--s1", "ollama": "--s2" };
+const cssvar = n => getComputedStyle(document.body).getPropertyValue(n).trim();
+const fmt = (v, d = 1) => Number(v).toFixed(d);
+
+function rowsFor(summary, prompt, field) {
+  const out = {};
+  for (const name of Object.keys(SERIES)) {
+    const pts = summary
+      .filter(r => r.backend === name && r.prompt === prompt)
+      .sort((a, b) => a.ngl - b.ngl)
+      .map(r => ({ x: r.ngl, y: r[field], row: r }));
+    if (pts.length) out[name] = pts;
+  }
+  return out;
+}
+
+function speedup(summary, prompt, field) {
+  let best = null;
+  for (const name of Object.keys(SERIES)) {
+    const pts = summary.filter(r => r.backend === name && r.prompt === prompt).sort((a, b) => a.ngl - b.ngl);
+    if (pts.length < 2) continue;
+    const ratio = pts[pts.length - 1][field] / pts[0][field];
+    if (!best || ratio > best.ratio) best = { ratio, name, lo: pts[0], hi: pts[pts.length - 1] };
+  }
+  return best;
+}
+
+/* One panel: a single y-scale, never two. Hover gives the exact numbers so the
+   chart never has to carry a label on every point. */
+function drawChart(panel, series, { yLabel, unit, decimals = 1 }) {
+  const svg = panel.querySelector("svg");
+  const tip = panel.querySelector(".tip");
+  const W = panel.clientWidth - 32, H = 252;
+  const M = { t: 14, r: 78, b: 38, l: 56 };
+  const iw = W - M.l - M.r, ih = H - M.t - M.b;
+  const names = Object.keys(series);
+  if (!names.length) { svg.innerHTML = ""; return; }
+
+  const xs = [...new Set(names.flatMap(n => series[n].map(p => p.x)))].sort((a, b) => a - b);
+  const yMax = Math.max(...names.flatMap(n => series[n].map(p => p.y))) * 1.14;
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const sx = v => M.l + (xMax === xMin ? iw / 2 : (v - xMin) / (xMax - xMin) * iw);
+  const sy = v => M.t + ih - (v / yMax) * ih;
+
+  const grid = cssvar("--grid"), t2 = cssvar("--text-2"), surf = cssvar("--panel");
+  const ticks = 4, parts = [];
+
+  for (let i = 0; i <= ticks; i++) {
+    const v = yMax * i / ticks, y = sy(v);
+    parts.push(`<line x1="${M.l}" y1="${y}" x2="${M.l + iw}" y2="${y}" stroke="${grid}" stroke-width="1"/>`);
+    parts.push(`<text x="${M.l - 10}" y="${y + 4}" fill="${t2}" font-size="11" text-anchor="end">${fmt(v, v >= 100 ? 0 : 1)}</text>`);
+  }
+  for (const x of xs) {
+    parts.push(`<text x="${sx(x)}" y="${M.t + ih + 20}" fill="${t2}" font-size="11" text-anchor="middle">${x}</text>`);
+  }
+  parts.push(`<text x="${M.l + iw / 2}" y="${H - 4}" fill="${t2}" font-size="11" text-anchor="middle">transformer layers offloaded to GPU</text>`);
+  parts.push(`<text transform="translate(13,${M.t + ih / 2}) rotate(-90)" fill="${t2}" font-size="11" text-anchor="middle">${yLabel}</text>`);
+
+  for (const name of names) {
+    const col = cssvar(SERIES[name]);
+    const pts = series[name];
+    parts.push(`<path d="${pts.map((p, i) => (i ? "L" : "M") + sx(p.x) + " " + sy(p.y)).join(" ")}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`);
+    for (const p of pts) {
+      parts.push(`<circle cx="${sx(p.x)}" cy="${sy(p.y)}" r="4.5" fill="${col}" stroke="${surf}" stroke-width="1.5"/>`);
+    }
+    const last = pts[pts.length - 1];
+    parts.push(`<text x="${sx(last.x) + 11}" y="${sy(last.y) + 4}" fill="${t2}" font-size="11">${name}</text>`);
+  }
+
+  parts.push(`<line class="cross" x1="0" y1="${M.t}" x2="0" y2="${M.t + ih}" stroke="${grid}" stroke-width="1" opacity="0"/>`);
+  parts.push(`<rect class="hit" x="${M.l}" y="${M.t}" width="${iw}" height="${ih}" fill="transparent"/>`);
+
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", H);
+  svg.innerHTML = parts.join("");
+
+  const cross = svg.querySelector(".cross");
+  svg.querySelector(".hit").addEventListener("mousemove", ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) * (W / box.width);
+    const near = xs.reduce((a, b) => Math.abs(sx(b) - px) < Math.abs(sx(a) - px) ? b : a);
+    cross.setAttribute("x1", sx(near)); cross.setAttribute("x2", sx(near)); cross.setAttribute("opacity", "1");
+    const lines = names.filter(n => series[n].some(p => p.x === near)).map(n => {
+      const p = series[n].find(q => q.x === near);
+      return `<div class="t-row"><span><span class="dot" style="background:${cssvar(SERIES[n])}"></span>${n}</span><strong>${fmt(p.y, decimals)} ${unit}</strong></div>`;
+    }).join("");
+    tip.innerHTML = `<div class="t-head">${near} layers on GPU</div>${lines}`;
+    tip.style.opacity = "1";
+    const left = Math.min(Math.max(sx(near) * (box.width / W) - 60, 8), panel.clientWidth - tip.offsetWidth - 8);
+    tip.style.left = left + "px";
+    tip.style.top = "46px";
+  });
+  svg.querySelector(".hit").addEventListener("mouseleave", () => {
+    tip.style.opacity = "0"; cross.setAttribute("opacity", "0");
+  });
+}
+
+function render(data) {
+  const { meta, summary } = data;
+  const host = meta.host || {};
+  document.getElementById("meta").innerHTML =
+    `<code>${meta.model}</code> · ${host.chip || "unknown"} · ${host.ram_gb || "?"} GB · ` +
+    `median of ${meta.repeats} run(s) · ${meta.timestamp}`;
+
+  const pre = speedup(summary, "long", "prefill_tps");
+  const dec = speedup(summary, "long", "decode_tps");
+  const fastest = summary.filter(r => r.prompt === "long")
+    .reduce((a, b) => (b.decode_tps > a.decode_tps ? b : a));
+
+  document.getElementById("body").innerHTML = `
+    <div class="tiles">
+      <div class="tile">
+        <div class="label">Prefill: CPU → GPU</div>
+        <div class="value">${pre ? fmt(pre.ratio, 1) + "×" : "—"}</div>
+        <div class="note">${pre ? `${fmt(pre.lo.prefill_tps, 0)} → ${fmt(pre.hi.prefill_tps, 0)} tok/s · ${pre.name}` : ""}</div>
+      </div>
+      <div class="tile">
+        <div class="label">Decode: CPU → GPU</div>
+        <div class="value">${dec ? fmt(dec.ratio, 1) + "×" : "—"}</div>
+        <div class="note">${dec ? `${fmt(dec.lo.decode_tps, 1)} → ${fmt(dec.hi.decode_tps, 1)} tok/s · ${dec.name}` : ""}</div>
+      </div>
+      <div class="tile">
+        <div class="label">Fastest decode</div>
+        <div class="value">${fmt(fastest.decode_tps, 1)}</div>
+        <div class="note">tok/s · ${fastest.backend} at ${fastest.ngl} layers</div>
+      </div>
+    </div>
+
+    <div class="legend">
+      ${Object.entries(SERIES).map(([n, v]) =>
+        `<span class="key"><span class="swatch" style="background:var(${v})"></span>${n}</span>`).join("")}
+      <span style="margin-left:auto">long prompt · ~3,000 tokens</span>
+    </div>
+
+    <div class="charts">
+      <div class="panel" id="p-prefill">
+        <h2>Prefill throughput</h2>
+        <div class="cap">Prompt ingestion. Compute-bound — this is where the GPU earns its keep.</div>
+        <svg></svg><div class="tip"></div>
+      </div>
+      <div class="panel" id="p-decode">
+        <h2>Decode throughput</h2>
+        <div class="cap">Token generation. Memory-bandwidth-bound, so the gradient is far flatter.</div>
+        <svg></svg><div class="tip"></div>
+      </div>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <caption>All measurements</caption>
+        <thead><tr>
+          <th>Backend</th><th>GPU layers</th><th>Prompt</th>
+          <th>TTFT (s)</th><th>Prefill (tok/s)</th><th>Decode (tok/s)</th><th>Prompt tokens</th>
+        </tr></thead>
+        <tbody>${summary.slice().sort((a, b) =>
+          a.prompt.localeCompare(b.prompt) || a.backend.localeCompare(b.backend) || a.ngl - b.ngl)
+          .map(r => `<tr>
+            <td><span class="dot" style="background:var(${SERIES[r.backend] || "--text-2"})"></span>${r.backend}</td>
+            <td>${r.ngl}</td><td>${r.prompt}</td>
+            <td>${fmt(r.ttft_s, 3)}</td><td>${fmt(r.prefill_tps, 1)}</td>
+            <td>${fmt(r.decode_tps, 2)}</td><td>${r.prompt_tokens}</td>
+          </tr>`).join("")}</tbody>
+      </table>
+    </div>
+
+    <footer>Both engines serve the same GGUF blob — <code>${(meta.gguf || "").split("/").pop()}</code>.
+    Re-run <code>python -m bench.run</code> and refresh to update.</footer>`;
+
+  const draw = () => {
+    drawChart(document.getElementById("p-prefill"),
+      rowsFor(summary, "long", "prefill_tps"), { yLabel: "tokens / second", unit: "tok/s", decimals: 1 });
+    drawChart(document.getElementById("p-decode"),
+      rowsFor(summary, "long", "decode_tps"), { yLabel: "tokens / second", unit: "tok/s", decimals: 2 });
+  };
+  draw();
+  clearTimeout(window.__rz);
+  window.onresize = () => { clearTimeout(window.__rz); window.__rz = setTimeout(draw, 120); };
+}
+
+fetch("/api/results")
+  .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.error || r.statusText)))
+  .then(render)
+  .catch(err => {
+    document.getElementById("meta").textContent = "";
+    document.getElementById("body").innerHTML =
+      `<div class="err"><strong>No results yet.</strong><br>${err}<br><br>
+       Run <code>.venv/bin/python -m bench.run --quick</code>, then refresh.</div>`;
+  });
+</script>
